@@ -1,20 +1,15 @@
-#define EIGEN_DISABLE_UNALIGNED_ARRAY_ASSERT
-#define EIGEN_DONT_VECTORIZE
-
 #include <GL/freeglut.h>
-#include <Windows.h>
-
-#define _USE_MATH_DEFINES
-
 #include <math.h>
 #include <vector>
 #include <iostream>
 #include <ctime>
-#include <random>
 #include <fstream>
 #include <string>
 #include "../triangle_light/Camera.h"
 
+#define TRIANGLE_NUM 9
+#define RECTANGLE_NUM 2
+#define LIGHT_SOURCE_NUM 7
 enum MouseMode {
     MM_CAMERA
 };
@@ -24,7 +19,6 @@ struct RayHit {
     double alpha;
     double beta;
     int mesh_idx;
-    int tri_idx;
 };
 
 struct RectangleObj {
@@ -50,65 +44,57 @@ struct TriangleObj {
 
 const int g_FilmWidth = 640;
 const int g_FilmHeight = 480;
-const int sample_num = 100;
+const int sample_num = 10;
 
 int mx, my;
 int width = 640;
 int height = 480;
 int NUM_OF_SAMPLE = 0;
 int *g_CountBuffer = nullptr;
+int method_num = 1;
 
 const double __FAR__ = 1.0e33;
 
-double intensity = 2.5;
+double intensity = 5.0;
 double g_FrameSize_WindowSize_Scale_x = 1.0;
 double g_FrameSize_WindowSize_Scale_y = 1.0;
+double tri_area = 0.0;
+double pdf[TRIANGLE_NUM];
+double cdf[LIGHT_SOURCE_NUM];
 
 float *g_FilmBuffer = nullptr;
 float *g_AccumulationBuffer = nullptr;
 
 bool g_DrawFilm = true;
-bool method1 = true;
 
 GLuint g_FilmTexture = 0;
 MouseMode g_MouseMode = MM_CAMERA;
 Camera g_Camera;
-RectangleObj rects[2];
-TriangleObj tris[5];
+RectangleObj rects[RECTANGLE_NUM];
+TriangleObj tris[TRIANGLE_NUM];
 
 
 inline float drand48() {
     return float(((double) (rand()) / (RAND_MAX))); /* RAND_MAX = 32767 */
 }
 
-/**
- * @param rgb 0~255
- * @param out_rgb 0~1
- */
+//RGB値(0~255)を(0~1)へ正規化
 Eigen::Vector3d rgbNormalize(const Eigen::Vector3d rgb) {
-    Eigen::Vector3d out_rgb{
-            rgb.x() / 255,
-            rgb.y() / 255,
-            rgb.z() / 255
-    };
-
+    Eigen::Vector3d out_rgb{rgb.x() / 255, rgb.y() / 255, rgb.z() / 255};
     return out_rgb;
 }
 
 void initFilm() {
-    g_FilmBuffer = (float *) malloc(
-            sizeof(float) * g_FilmWidth * g_FilmHeight * 3);
+    g_FilmBuffer = (float *) malloc(sizeof(float) * g_FilmWidth * g_FilmHeight * 3);
     memset(g_FilmBuffer, 0, sizeof(float) * g_FilmWidth * g_FilmHeight * 3);
 
     g_AccumulationBuffer = (float *) malloc(sizeof(float) * g_FilmWidth * g_FilmHeight * 3);
     g_CountBuffer = (int *) malloc(sizeof(int) * g_FilmWidth * g_FilmHeight);
 
-
     glGenTextures(1, &g_FilmTexture);
     glBindTexture(GL_TEXTURE_2D, g_FilmTexture);
 
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, g_FilmWidth, g_FilmHeight, 0, GL_RGB,
-                 GL_FLOAT, g_FilmBuffer);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, g_FilmWidth, g_FilmHeight, 0, GL_RGB, GL_FLOAT, g_FilmBuffer);
 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -133,37 +119,16 @@ void updateFilm() {
             g_FilmBuffer[i * 3 + 2] = 0.0;
         }
     }
-
-
     glBindTexture(GL_TEXTURE_2D, g_FilmTexture);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, g_FilmWidth, g_FilmHeight, GL_RGB,
-                    GL_FLOAT, g_FilmBuffer);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, g_FilmWidth, g_FilmHeight, GL_RGB, GL_FLOAT, g_FilmBuffer);
 }
 
 void drawFilm() {
-    Eigen::Vector3d screen_center = g_Camera.getEyePoint() -
-                                    g_Camera.getZVector() *
-                                    g_Camera.getFocalLength();
-    Eigen::Vector3d p1 = screen_center -
-                         g_Camera.getXVector() * g_Camera.getScreenWidth() *
-                         0.5 -
-                         g_Camera.getYVector() * g_Camera.getScreenHeight() *
-                         0.5;
-    Eigen::Vector3d p2 = screen_center +
-                         g_Camera.getXVector() * g_Camera.getScreenWidth() *
-                         0.5 -
-                         g_Camera.getYVector() * g_Camera.getScreenHeight() *
-                         0.5;
-    Eigen::Vector3d p3 = screen_center +
-                         g_Camera.getXVector() * g_Camera.getScreenWidth() *
-                         0.5 +
-                         g_Camera.getYVector() * g_Camera.getScreenHeight() *
-                         0.5;
-    Eigen::Vector3d p4 = screen_center -
-                         g_Camera.getXVector() * g_Camera.getScreenWidth() *
-                         0.5 +
-                         g_Camera.getYVector() * g_Camera.getScreenHeight() *
-                         0.5;
+    Eigen::Vector3d screen_center = g_Camera.getEyePoint() - g_Camera.getZVector() * g_Camera.getFocalLength();
+    Eigen::Vector3d p1 = screen_center - g_Camera.getXVector() * g_Camera.getScreenWidth() * 0.5 - g_Camera.getYVector() * g_Camera.getScreenHeight() * 0.5;
+    Eigen::Vector3d p2 = screen_center + g_Camera.getXVector() * g_Camera.getScreenWidth() * 0.5 - g_Camera.getYVector() * g_Camera.getScreenHeight() * 0.5;
+    Eigen::Vector3d p3 = screen_center + g_Camera.getXVector() * g_Camera.getScreenWidth() * 0.5 + g_Camera.getYVector() * g_Camera.getScreenHeight() * 0.5;
+    Eigen::Vector3d p4 = screen_center - g_Camera.getXVector() * g_Camera.getScreenWidth() * 0.5 + g_Camera.getYVector() * g_Camera.getScreenHeight() * 0.5;
 
     glEnable(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D, g_FilmTexture);
@@ -195,34 +160,33 @@ void clearRayTracedResult() {
 }
 
 void
-makeRectangle(const Eigen::Vector3d &centerPos, const Eigen::Vector3d &widthVec,
-              const Eigen::Vector3d &heightVec, const Eigen::Vector3d &color,
-              RectangleObj &out_Rect) {
+makeRectangle(const Eigen::Vector3d &centerPos, const Eigen::Vector3d &widthVec, const Eigen::Vector3d &heightVec, const Eigen::Vector3d &color, const bool &is_light, const double &kd, RectangleObj &out_Rect) {
     out_Rect.centerPos = centerPos;
     out_Rect.widthVec = widthVec;
     out_Rect.heightVec = heightVec;
     out_Rect.color = rgbNormalize(color);
+    out_Rect.is_light = is_light;
+    out_Rect.kd = kd;
     const Eigen::Vector3d v1 = centerPos - widthVec - heightVec;
     const Eigen::Vector3d v2 = centerPos + widthVec + heightVec;
     const Eigen::Vector3d v3 = centerPos - widthVec + heightVec;
     out_Rect.n = ((v1 - v3).cross(v2 - v3)).normalized();
 }
 
-void makeTriangle(const Eigen::Vector3d &v1, const Eigen::Vector3d &v2, const Eigen::Vector3d &v3,
-                  const Eigen::Vector3d &color, TriangleObj &out_Tri) {
+void makeTriangle(const Eigen::Vector3d &v1, const Eigen::Vector3d &v2, const Eigen::Vector3d &v3, const Eigen::Vector3d &color, const bool &is_light, const double &kd, TriangleObj &out_Tri) {
     out_Tri.v1 = v1;
     out_Tri.v2 = v2;
     out_Tri.v3 = v3;
     out_Tri.color = rgbNormalize(color);
     out_Tri.area = (((v2 - v1).cross(v3 - v1)) / 2).norm();
+    out_Tri.is_light = is_light;
+    out_Tri.kd = kd;
     out_Tri.n = ((v2 - v1).cross(v3 - v1)).normalized();
 }
 
 
-void raySquareIntersection(const RectangleObj &rect, const int in_Triangle_idx,
-                           const Ray &in_Ray, RayHit &out_Result) {
+void raySquareIntersection(const RectangleObj &rect, const Ray &in_Ray, RayHit &out_Result) {
     out_Result.t = __FAR__;
-
     const Eigen::Vector3d v1 = rect.centerPos - rect.widthVec - rect.heightVec;
     const Eigen::Vector3d v2 = rect.centerPos + rect.widthVec + rect.heightVec;
     const Eigen::Vector3d v3 = rect.centerPos - rect.widthVec + rect.heightVec;
@@ -258,8 +222,7 @@ void raySquareIntersection(const RectangleObj &rect, const int in_Triangle_idx,
     out_Result.beta = alpha_beta.y();
 }
 
-void rayTriangleIntersection(const TriangleObj &tris, const int in_Triangle_idx,
-                             const Ray &in_Ray, RayHit &out_Result) {
+void rayTriangleIntersection(const TriangleObj &tris, const Ray &in_Ray, RayHit &out_Result) {
     out_Result.t = __FAR__;
 
     const Eigen::Vector3d v1 = tris.v1;
@@ -287,7 +250,7 @@ void rayTriangleIntersection(const TriangleObj &tris, const int in_Triangle_idx,
 
     const Eigen::Vector2d alpha_beta = ATA.inverse() * b;
 
-    //三角形内部かどうかの判定
+    //三角形の内部判定
     if (alpha_beta.x() < 0.0 || 1.0 < alpha_beta.x() || alpha_beta.y() < 0.0 ||
         1.0 < alpha_beta.y() || (1 - alpha_beta.x() - alpha_beta.y()) < 0.0 ||
         1.0 < (1 - alpha_beta.x() - alpha_beta.y()))
@@ -298,25 +261,59 @@ void rayTriangleIntersection(const TriangleObj &tris, const int in_Triangle_idx,
     out_Result.beta = alpha_beta.y();
 }
 
-double AreaNormalize(){
-    double t_area = 0.0;
-    for(int i = 0; i<5;i++){
-        if(tris[i].is_light){
+void TotalTriangleArea(double &t_area) {
+    for (int i = 0; i < TRIANGLE_NUM; i++) {
+        if (tris[i].is_light) {
             t_area += tris[i].area;
         }
     }
-    return t_area;
 }
+
+void PDF(double *PDF, double &t_area) {
+    for (int i = 0; i < TRIANGLE_NUM; i++) {
+        PDF[i] = tris[i].area / t_area;
+    }
+}
+
+void CDF(double *CDF, double *PDF) {
+    for (int i = 0; i < LIGHT_SOURCE_NUM; i++) {
+        if (i == 0) {
+            CDF[i] = PDF[i];
+        } else {
+            CDF[i] = CDF[i - 1] + PDF[i];
+            //std::cout << "No." << i  << " " << CDF[i] << std::endl;
+        }
+    }
+}
+
+void CalcAdoptionRatio() {
+    TotalTriangleArea(tri_area);
+    PDF(pdf, tri_area);
+    CDF(cdf, pdf);
+}
+
+void ChooseTriangle(int &t) {
+    double random = drand48();
+    int mid = LIGHT_SOURCE_NUM/2;
+    for (int i = 0; i < LIGHT_SOURCE_NUM; i++) {
+        if (random < cdf[i]) {
+            t = i;
+            break;
+        }
+    }
+}
+
+
 
 void rayTracing(const Ray &in_Ray, RayHit &io_Hit) {
     double t_min = __FAR__;
     double alpha_I = 0.0, beta_I = 0.0;
     int mesh_idx = -1;
 
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < TRIANGLE_NUM; i++) {
         RayHit temp_hit{};
-        raySquareIntersection(rects[i], i, in_Ray, temp_hit);
-        rayTriangleIntersection(tris[i], i, in_Ray, temp_hit);
+        raySquareIntersection(rects[i], in_Ray, temp_hit);
+        rayTriangleIntersection(tris[i], in_Ray, temp_hit);
         if (temp_hit.t < t_min) {
             t_min = temp_hit.t;
             alpha_I = temp_hit.alpha;
@@ -335,20 +332,19 @@ void saveppm() {
 
     std::ofstream writing_file;
     std::string filename;
+    std::string path = "C:/Users/narus/";
 
-    if (method1 == true)
-        filename = "C:\\Users\\narus\\cg_ppm\\method1_" + std::to_string(NUM_OF_SAMPLE) + ".ppm";
+    if (method_num == 1)
+        filename = path + "method1_" + std::to_string(NUM_OF_SAMPLE) + ".ppm";
     else
-        filename = "C:\\Users\\narus\\cg_ppm\\method2_" + std::to_string(NUM_OF_SAMPLE) + ".ppm";
+        filename = path + "method2_" + std::to_string(NUM_OF_SAMPLE) + ".ppm";
 
     writing_file.open(filename, std::ios::out);
     std::string header = "P3\n" + std::to_string(g_FilmWidth) + " " + std::to_string(g_FilmHeight) + "\n" + "255\n";
     writing_file << header << std::endl;
 
     for (int i = 0; i < g_FilmWidth * g_FilmHeight; i++) {
-        std::string pixel = std::to_string(int(g_FilmBuffer[i * 3] * 255)) + " " +
-                            std::to_string(int(g_FilmBuffer[i * 3 + 1] * 255)) + " " +
-                            std::to_string(int(g_FilmBuffer[i * 3 + 2] * 255));
+        std::string pixel = std::to_string(int(g_FilmBuffer[i * 3] * 255)) + " " + std::to_string(int(g_FilmBuffer[i * 3 + 1] * 255)) + " " + std::to_string(int(g_FilmBuffer[i * 3 + 2] * 255));
         if (i % g_FilmWidth == g_FilmWidth - 1) {
             writing_file << pixel << std::endl;
         } else {
@@ -360,114 +356,125 @@ void saveppm() {
 
 
 void Learn() {
-    for (int y = 0; y < g_FilmHeight; y++) {
-        for (int x = 0; x < g_FilmWidth; x++) {
-            const int pixel_idx = y * g_FilmWidth + x;
-
-            const double p_x = (x + 0.5) / g_FilmWidth;
-            const double p_y = (y + 0.5) / g_FilmHeight;
+    int count_rayhit_idx[9];
+    memset(count_rayhit_idx, 0,sizeof count_rayhit_idx);
+    std::cout << "Start"<< std::endl;
+    double A = 0.0;
+    Eigen::Vector3d sum;
+    for (int Y = 0; Y < g_FilmHeight; Y++) {
+        for (int X = 0; X < g_FilmWidth; X++) {
+            const int pixel_idx = Y * g_FilmWidth + X;
+            const double p_x = (X + 0.5) / g_FilmWidth;
+            const double p_y = (Y + 0.5) / g_FilmHeight;
 
             Ray ray;
             g_Camera.screenView(p_x, p_y, ray);
 
             RayHit ray_hit;
             rayTracing(ray, ray_hit);
+
             if (ray_hit.mesh_idx >= 0) {
                 if (tris[ray_hit.mesh_idx].is_light == true) {
-                    // 当たった四角形が光源ならば光源の色を返す
-                    g_AccumulationBuffer[pixel_idx * 3] += tris[ray_hit.mesh_idx].color.x();
-                    g_AccumulationBuffer[pixel_idx * 3 + 1] += tris[ray_hit.mesh_idx].color.y();
-                    g_AccumulationBuffer[pixel_idx * 3 + 2] += tris[ray_hit.mesh_idx].color.z();
+                    for (int i = 0; i < 3; i++) {
+                        g_AccumulationBuffer[pixel_idx * 3 + i] += tris[ray_hit.mesh_idx].color[i];
+                    }
                     g_CountBuffer[pixel_idx] += 1;
 
                 } else {
-                    const double A = tris[0].area;
-                    Eigen::Vector3d sum{0.0, 0.0, 0.0};
+                    //飛ばされたレイと拡散面上の点
+                    const Eigen::Vector3d x = ray.o + ray_hit.t * ray.d;
+                    Eigen::Vector3d pixel_color;
+                    Eigen::Vector3d I_n;
+                    sum = {0.0, 0.0, 0.0};
 
-                    //面光源
-                    method1 = false;
-                    for (int i = 0; i < sample_num; i++) {
-                        // L_iを用意する
-                        const float gamma = 1.0 - sqrt(1.0 - drand48());
-                        const float beta = drand48() * (1.0 - gamma);
-                        const Eigen::Vector3d y = (1.0 - beta - gamma) * tris[0].v1 + beta * tris[0].v2 + gamma * tris[0].v3;
-                        const Eigen::Vector3d x = ray.o + ray_hit.t * ray.d;
-                        const Eigen::Vector3d y_x = y - x;
-                        const Eigen::Vector3d w = y_x.normalized();
-                        // 光源から飛ばしたときに間に遮蔽物があるかどうかを判定するべきだがスキップします。
-                        const Eigen::Vector3d ny = tris[0].n;
-                        const Eigen::Vector3d nx = tris[ray_hit.mesh_idx].n;
+                    //方向サンプリング
+                    //面の裏側をサンプリングしている？
+                    if (method_num == 1) {
 
-                        const double cosx = w.dot(nx);
-                        const double cosy = (-w).dot(ny);
+                        for (int n = 0; n < sample_num; n++) {
+                            const double theta = asin(sqrt(drand48()));
+                            const double phi = 2 * M_PI * drand48();
+                            const Eigen::Vector3d omega = {sin(theta) * cos(phi), cos(theta), sin(theta) * sin(phi)};
 
-                        sum = sum + (intensity * tris[ray_hit.mesh_idx].kd / M_PI *
-                                     cosx * cosy / y_x.squaredNorm()) * tris[0].color;
+                            Ray _ray;
+                            _ray.o = x;
+                            _ray.d = omega;
 
+                            RayHit _ray_hit;
+
+                            rayTracing(_ray, _ray_hit);
+
+                            if(ray_hit.mesh_idx==7&&_ray_hit.mesh_idx!=-1){
+                                count_rayhit_idx[_ray_hit.mesh_idx] += 1;
+                            }
+
+                            if (_ray_hit.mesh_idx == -1 || tris[_ray_hit.mesh_idx].is_light == false) {
+                                //何も行わない
+                            } else {
+                                sum = sum + intensity * tris[_ray_hit.mesh_idx].color;
+                            }
+                        }
+                        I_n = sum;
+                        pixel_color = tris[ray_hit.mesh_idx].kd * tris[ray_hit.mesh_idx].color.cwiseProduct(I_n);
                     }
-                    const Eigen::Vector3d I_n = sum * A;
-                    const Eigen::Vector3d pixel_color = tris[ray_hit.mesh_idx].color.cwiseProduct(I_n);
-
-                    g_AccumulationBuffer[pixel_idx * 3] += pixel_color.x();
-                    g_AccumulationBuffer[pixel_idx * 3 + 1] += pixel_color.y();
-                    g_AccumulationBuffer[pixel_idx * 3 + 2] += pixel_color.z();
-                    g_CountBuffer[pixel_idx] += sample_num;
-                    NUM_OF_SAMPLE = g_CountBuffer[pixel_idx];
+                    //面サンプリング
                     //
+                    if (method_num == 2) {
 
+                        for (int i = 0; i < sample_num; i++) {
+                            int tri_idx;
+                            int V = 1;
+                            ChooseTriangle(tri_idx);
+                            A = tris[tri_idx].area;
+                            const float gamma = 1.0 - sqrt(1.0 - drand48());
+                            const float beta = drand48() * (1.0 - gamma);
+                            const Eigen::Vector3d xa = (1.0 - beta - gamma) * tris[tri_idx].v1 + beta * tris[tri_idx].v2 + gamma * tris[tri_idx].v3;
+                            const Eigen::Vector3d xa_x = xa - x;
+                            const Eigen::Vector3d w = xa_x.normalized();
+                            const Eigen::Vector3d ny = tris[tri_idx].n;
+                            const Eigen::Vector3d nx = tris[ray_hit.mesh_idx].n;
+                            const double cosx = w.dot(nx);
+                            const double cosy = (-w).dot(ny);
 
-                    /*四方八方にレイを飛ばして、色を決める
-                    method1 = true;
-                    for (int n = 0; n < sample_num; n++) {
-                        const Eigen::Vector3d x = ray.o + ray_hit.t * ray.d;
-                        const double theta = asin(sqrt(drand48()));
-                        const double phi = 2 * M_PI * drand48();
+                            Ray _ray;
+                            _ray.o = x;
+                            _ray.d = xa;
 
-                        const Eigen::Vector3d omega{
-                                sin(theta) * cos(phi),
-                                cos(theta),
-                                sin(theta) * sin(phi)
-                        };
+                            RayHit _ray_hit;
 
-                        Ray _ray;
-                        _ray.o = x;
-                        _ray.d = omega;
+                            rayTracing(_ray, _ray_hit);
 
-                        RayHit _ray_hit;
+                            if (_ray_hit.mesh_idx == -1 || tris[_ray_hit.mesh_idx].is_light == false) {
+                                V = 0;
+                            }
 
-                        rayTracing(_ray, _ray_hit);
-
-
-                        if (_ray_hit.mesh_idx == -1 ||
-                            rects[_ray_hit.mesh_idx].is_light == false) {
-                            sum = sum + Eigen::Vector3d{ 0.0, 0.0, 0.0 };
+                            sum = sum + (intensity * tris[ray_hit.mesh_idx].kd / M_PI * cosx * cosy / xa_x.squaredNorm() * V) * tris[tri_idx].color;
                         }
-                        else {
-                            const Eigen::Vector3d l = x + _ray_hit.t * omega;
-                            sum = sum +
-                                intensity * rects[_ray_hit.mesh_idx].color;
-                        }
+                        I_n = sum * A;
+                        pixel_color = tris[ray_hit.mesh_idx].color.cwiseProduct(I_n);
                     }
-                    const Eigen::Vector3d i_n = sum;
-                    const Eigen::Vector3d pixel_color =
-                    rects[ray_hit.mesh_idx].kd * rects[ray_hit.mesh_idx].color.cwiseProduct(i_n);
-                    g_AccumulationBuffer[pixel_idx * 3] += pixel_color.x();
-                    g_AccumulationBuffer[pixel_idx * 3 + 1] += pixel_color.y();
-                    g_AccumulationBuffer[pixel_idx * 3 + 2] += pixel_color.z();
+
+                    //求めたRGB値をピクセルごとに代入
+                    for (int i = 0; i < 3; i++) {
+                        g_AccumulationBuffer[pixel_idx * 3 + i] += pixel_color[i];
+                    }
                     g_CountBuffer[pixel_idx] += sample_num;
                     NUM_OF_SAMPLE = g_CountBuffer[pixel_idx];
-                    */
+
                 }
             } else {
-                const Eigen::Vector3d pixel_color = rgbNormalize(Eigen::Vector3d{173, 216, 230});
-
-                g_AccumulationBuffer[pixel_idx * 3] += pixel_color.x();
-                g_AccumulationBuffer[pixel_idx * 3 + 1] += pixel_color.y();
-                g_AccumulationBuffer[pixel_idx * 3 + 2] += pixel_color.z();
+                const Eigen::Vector3d pixel_color = rgbNormalize(Eigen::Vector3d{40, 40, 40});
+                for (int i = 0; i < 3; i++) {
+                    g_AccumulationBuffer[pixel_idx * 3 + i] += pixel_color[i];
+                }
                 g_CountBuffer[pixel_idx] += 1;
             }
         }
     }
+    for(int i = 0; i<9;i++){
+        std::cout << "No." << i << " "<< count_rayhit_idx[i] << std::endl;
+    }
+    std::cout << "End"<< std::endl;
     updateFilm();
     glutPostRedisplay();
 }
@@ -555,43 +562,17 @@ void projection_and_modelview(const Camera &in_Camera) {
 
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
-    gluPerspective(fovy_deg, double(width) / double(height),
-                   0.01 * in_Camera.getFocalLength(), 1000.0);
+    gluPerspective(fovy_deg, double(width) / double(height), 0.01 * in_Camera.getFocalLength(), 1000.0);
 
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 
     const Eigen::Vector3d lookAtPoint = in_Camera.getLookAtPoint();
-    gluLookAt(in_Camera.getEyePoint().x(), in_Camera.getEyePoint().y(),
-              in_Camera.getEyePoint().z(), lookAtPoint.x(), lookAtPoint.y(),
-              lookAtPoint.z(), in_Camera.getYVector().x(),
-              in_Camera.getYVector().y(), in_Camera.getYVector().z());
-}
-
-void drawFloor() {
-    glBegin(GL_TRIANGLES);
-    for (int j = -20; j < 20; j++) {
-        for (int i = -20; i < 20; i++) {
-            int checker_bw = (i + j) % 2;
-            if (checker_bw == 0) {
-                glColor3f(0.3, 0.3, 0.3);
-
-                glVertex3f(i * 0.5, 0.0, j * 0.5);
-                glVertex3f(i * 0.5, 0.0, (j + 1) * 0.5);
-                glVertex3f((i + 1) * 0.5, 0.0, j * 0.5);
-
-                glVertex3f(i * 0.5, 0.0, (j + 1) * 0.5);
-                glVertex3f((i + 1) * 0.5, 0.0, (j + 1) * 0.5);
-                glVertex3f((i + 1) * 0.5, 0.0, j * 0.5);
-            }
-        }
-    }
-    glEnd();
+    gluLookAt(in_Camera.getEyePoint().x(), in_Camera.getEyePoint().y(), in_Camera.getEyePoint().z(), lookAtPoint.x(), lookAtPoint.y(), lookAtPoint.z(), in_Camera.getYVector().x(), in_Camera.getYVector().y(), in_Camera.getYVector().z());
 }
 
 void display() {
-    glViewport(0, 0, width * g_FrameSize_WindowSize_Scale_x,
-               height * g_FrameSize_WindowSize_Scale_y);
+    glViewport(0, 0, width * g_FrameSize_WindowSize_Scale_x, height * g_FrameSize_WindowSize_Scale_y);
 
     glClearColor(0.0, 0.0, 1.0, 0.0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -605,11 +586,9 @@ void display() {
     if (g_DrawFilm)
         drawFilm();
 
-    drawTriangleObj(tris[0]);
-    drawTriangleObj(tris[1]);
-    drawTriangleObj(tris[2]);
-    drawTriangleObj(tris[3]);
-    drawTriangleObj(tris[4]);
+    for (int i = 0; i < TRIANGLE_NUM; i++) {
+        drawTriangleObj(tris[i]);
+    }
 
     glDisable(GL_DEPTH_TEST);
 
@@ -622,14 +601,12 @@ void resize(int w, int h) {
 }
 
 int main(int argc, char *argv[]) {
-    g_Camera.setEyePoint(Eigen::Vector3d{0.0, 1.0, 4.0});
-    g_Camera.lookAt(Eigen::Vector3d{0.0, 0.5, 0.0},
-                    Eigen::Vector3d{0.0, 1.0, 0.0});
+    g_Camera.setEyePoint(Eigen::Vector3d{6.0, 1.5, 1.0});
+    g_Camera.lookAt(Eigen::Vector3d{0.0, 0.5, -1.25}, Eigen::Vector3d{0.0, 1.0, 0.0});
 
     glutInit(&argc, argv);
     glutInitWindowSize(width, height);
-    glutInitDisplayMode(
-            GLUT_DOUBLE | GLUT_RGBA | GLUT_DEPTH | GLUT_MULTISAMPLE);
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGBA | GLUT_DEPTH | GLUT_MULTISAMPLE);
 
     glutCreateWindow("Hello world!!");
 
@@ -641,58 +618,21 @@ int main(int argc, char *argv[]) {
     g_FrameSize_WindowSize_Scale_x = double(dims[2]) / double(width);
     g_FrameSize_WindowSize_Scale_y = double(dims[3]) / double(height);
 
-    makeRectangle(Eigen::Vector3d{0.0, 0.0, -1.0},
-                  Eigen::Vector3d{1.0, 0.0, 0.0},
-                  Eigen::Vector3d{0.0, 0.0, -1.0},
-                  Eigen::Vector3d{255, 255, 255}, rects[0]);
-    makeRectangle(Eigen::Vector3d{0.0, 1.0, -2.0},
-                  Eigen::Vector3d{1.0, 0.0, 0.0},
-                  Eigen::Vector3d{0.0, 1.0, 0.0},
-                  Eigen::Vector3d{255, 255, 255}, rects[1]);
+    makeRectangle(Eigen::Vector3d{0.0, 0.0, -1.0}, Eigen::Vector3d{1.0, 0.0, 0.0}, Eigen::Vector3d{0.0, 0.0, -1.0}, Eigen::Vector3d{255, 255, 255}, false, 1.0, rects[0]);
+    makeRectangle(Eigen::Vector3d{0.0, 1.0, -2.0}, Eigen::Vector3d{1.0, 0.0, 0.0}, Eigen::Vector3d{0.0, 1.0, 0.0}, Eigen::Vector3d{255, 255, 255}, true, 1.0, rects[1]);
 
-    makeTriangle(Eigen::Vector3d{-2.0, 2.0, -2.0},
-                 Eigen::Vector3d{-4.0, 0.0, -2.0},
-                 Eigen::Vector3d{0.0, 0.0, -2.0},
-                 Eigen::Vector3d{255.0, 255.0, 255.0}, tris[0]);
-
-    makeTriangle(Eigen::Vector3d{0.5, 0.5, -2.0},
-                 Eigen::Vector3d{0.5, 2.0, -2.0},
-                 Eigen::Vector3d{-1.5, 2.0, -2.0},
-                 Eigen::Vector3d{255.0, 255.0, 255.0}, tris[1]);
-
-    makeTriangle(Eigen::Vector3d{1.5, 2.0, -2.0},
-                 Eigen::Vector3d{1.0, 1.0, -2.0},
-                 Eigen::Vector3d{2.0, 0.0, -2.0},
-                 Eigen::Vector3d{255.0, 255.0, 255.0}, tris[2]);
-
-    makeTriangle(Eigen::Vector3d{1.0, 0.5, -2.0},
-                 Eigen::Vector3d{1.5, 0.0, -2.0},
-                 Eigen::Vector3d{0.5, 0.0, -2.0},
-                 Eigen::Vector3d{255.0, 255.0, 255.0}, tris[3]);
+    makeTriangle(Eigen::Vector3d{-2.0, 2.25, -2.0}, Eigen::Vector3d{-3.0, 0.0, -2.0}, Eigen::Vector3d{0.0, 0.0, -2.0}, Eigen::Vector3d{215.0, 14.0, 74.0}, true, 1.0, tris[0]);
+    makeTriangle(Eigen::Vector3d{0.25, 0.0, -2.0}, Eigen::Vector3d{0.5, 1.5, -2.0}, Eigen::Vector3d{-1.5, 2.25, -2.0}, Eigen::Vector3d{1.0, 195.0, 215.0}, true, 1.0, tris[1]);
+    makeTriangle(Eigen::Vector3d{1.5, 2.5, -2.0}, Eigen::Vector3d{0.75, 1.0, -2.0}, Eigen::Vector3d{1.75, 0.0, -2.0}, Eigen::Vector3d{50.0, 205.0, 50.0}, true, 1.0, tris[2]);
+    makeTriangle(Eigen::Vector3d{0.75, 0.75, -2.0}, Eigen::Vector3d{0.5, 0.0, -2.0}, Eigen::Vector3d{1.5, 0.0, -2.0}, Eigen::Vector3d{255.0, 244.0, 1.0}, true, 1.0, tris[3]);
+    makeTriangle(Eigen::Vector3d{2.0, 1.5, -2.0}, Eigen::Vector3d{2.0, 0.0, -2.0}, Eigen::Vector3d{3.0, 0.0, -2.0}, Eigen::Vector3d{147.0, 112.0, 219.0}, true, 1.0, tris[4]);
+    makeTriangle(Eigen::Vector3d{0.5, 0.25, 0.5}, Eigen::Vector3d{0.25, 0.0, 0.5}, Eigen::Vector3d{0.75, 0.0, 0.25}, Eigen::Vector3d{255.0, 255.0, 255.0}, true, 1.0, tris[5]);
+    makeTriangle(Eigen::Vector3d{-1.0, 1.5, 1.25}, Eigen::Vector3d{-1.0, 0.0, 1.25}, Eigen::Vector3d{-1.75, 0.0, 0.5}, Eigen::Vector3d{210.0, 105.0, 30.0}, true, 1.0, tris[6]);
+    makeTriangle(Eigen::Vector3d{0.0, 0.0, 1.5}, Eigen::Vector3d{3.0, 0.0, -1.5}, Eigen::Vector3d{-3.0, 0.0, -1.5}, Eigen::Vector3d{255.0, 255.0, 255.0}, false, 1.0, tris[7]);
+    makeTriangle(Eigen::Vector3d{-1.0, 0.0, -1.0}, Eigen::Vector3d{-0.5, 0.5, -1.0}, Eigen::Vector3d{-1.5, 0.5, -1.0}, Eigen::Vector3d{255.0, 255.0, 255.0}, false, 1.0, tris[8]);
 
 
-    makeTriangle(Eigen::Vector3d{0.0, 0.0, 2.0},
-                 Eigen::Vector3d{2.0, 0.0, -1.0},
-                 Eigen::Vector3d{-2.0, 0.0, -1.0},
-                 Eigen::Vector3d{255.0, 255.0, 255.0}, tris[4]);
-
-    rects[0].is_light = false;
-    rects[1].is_light = true;
-    tris[0].is_light = true;
-    tris[1].is_light = true;
-    tris[2].is_light = true;
-    tris[3].is_light = true;
-    tris[4].is_light = false;
-
-    rects[0].kd = 1.0;
-    rects[1].kd = 1.0;
-    tris[0].kd = 1.0;
-    tris[1].kd = 1.0;
-    tris[2].kd = 1.0;
-    tris[3].kd = 1.0;
-    tris[4].kd = 1.0;
-
-    AreaNormalize();
+    CalcAdoptionRatio();
 
     std::srand(time(NULL));
 
@@ -701,13 +641,9 @@ int main(int argc, char *argv[]) {
     glutMouseFunc(mouse);
     glutMotionFunc(mouseDrag);
     glutKeyboardFunc(key);
-
     initFilm();
     clearRayTracedResult();
-
-
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-
     glutMainLoop();
     return 0;
 }
